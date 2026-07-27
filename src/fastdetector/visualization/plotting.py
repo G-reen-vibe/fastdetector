@@ -3,19 +3,37 @@
 These are thin rendering functions. All classification computation (sweeps,
 TP/FP/TN/FN) lives in :mod:`fastdetector.visualization.metrics`; the functions
 here call those helpers when needed and focus purely on drawing.
+
+Naming convention: functions that render a matplotlib figure and return PNG
+bytes are named ``get_*``. Functions that render markdown text are named
+``generate_*`` / ``format_*``.
+
+This module deliberately does NOT import from
+:mod:`fastdetector.visualization.auto_visualizer`. That module imports *this*
+one, so a real import here creates a cycle that makes both modules
+unimportable. Plot inputs are typed structurally via :class:`PlotSeries`
+instead.
 """
 
-from typing import Dict
-from typing import Optional
-from typing import Tuple
-from fastdetector.visualization.auto_visualizer import StatWrapper
-from typing import List
 import io
+from typing import Dict, List, Optional, Protocol, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from fastdetector.visualization.metrics import _prf
+
+
+class PlotSeries(Protocol):
+    """Structural type for a plottable series: a named array of values.
+
+    Any object exposing ``name`` and ``arr`` satisfies this, which includes
+    :class:`~fastdetector.visualization.auto_visualizer.StatWrapper` and the
+    lightweight ad-hoc wrappers built by ``scripts/analysis.py``.
+    """
+
+    name: str
+    arr: np.ndarray
 
 def _save_fig_to_png() -> bytes:
     """Save the current matplotlib figure to PNG bytes and close it."""
@@ -25,11 +43,11 @@ def _save_fig_to_png() -> bytes:
     plt.close()
     return buf.read()
 
-def generate_histogram(wrappers: List[StatWrapper], title: str, bins: int = 50, figsize: Tuple[int, int] = (8, 5)) -> bytes:
+def get_histogram(wrappers: List[PlotSeries], title: str, bins: int = 50, figsize: Tuple[int, int] = (8, 5)) -> bytes:
     """Generate an overlay histogram of dataset values and render as PNG bytes.
 
     Args:
-        wrappers: List of StatWrapper instances containing arrays to plot.
+        wrappers: List of PlotSeries instances containing arrays to plot.
         title: Figure title string.
         bins: Number of histogram bins.
         figsize: Figure width and height tuple.
@@ -54,7 +72,7 @@ def generate_histogram(wrappers: List[StatWrapper], title: str, bins: int = 50, 
 
     for wrapper in wrappers:
         if wrapper.arr is not None:
-            plt.hist(wrapper.arr, bins=shared_edges, alpha=0.5, label=wrapper.label)
+            plt.hist(wrapper.arr, bins=shared_edges, alpha=0.5, label=wrapper.name)
             
     plt.title(title)
     plt.legend()
@@ -62,12 +80,12 @@ def generate_histogram(wrappers: List[StatWrapper], title: str, bins: int = 50, 
 
     return _save_fig_to_png()
 
-def generate_scatterplot(x_wrapper: StatWrapper, y_wrappers: List[StatWrapper], title: str, xlabel: str = "X", ylabel: str = "Y", point_alpha: float = 0.5, rolling_mean_window: int = 0, figsize: Tuple[int, int] = (8, 5)) -> bytes:
+def get_scatterplot(x_wrapper: PlotSeries, y_wrappers: List[PlotSeries], title: str, xlabel: str = "X", ylabel: str = "Y", point_alpha: float = 0.5, rolling_mean_window: int = 0, figsize: Tuple[int, int] = (8, 5)) -> bytes:
     """Generate a scatterplot (with optional rolling mean trendline) and render as PNG bytes.
 
     Args:
-        x_wrapper: StatWrapper for x-axis data.
-        y_wrappers: List of StatWrapper instances for y-axis datasets.
+        x_wrapper: PlotSeries for x-axis data.
+        y_wrappers: List of PlotSeries instances for y-axis datasets.
         title: Figure title string.
         xlabel: Label for x-axis.
         ylabel: Label for y-axis.
@@ -122,11 +140,11 @@ def generate_scatterplot(x_wrapper: StatWrapper, y_wrappers: List[StatWrapper], 
 
     return _save_fig_to_png()
 
-def generate_pearson_heatmap(wrappers: List[StatWrapper], title: str) -> bytes:
-    """Compute pairwise Pearson correlations among StatWrappers and render a heatmap.
+def get_pearson_heatmap(wrappers: List[PlotSeries], title: str) -> bytes:
+    """Compute pairwise Pearson correlations among PlotSeries and render a heatmap.
 
     Args:
-        wrappers: List of StatWrapper instances.
+        wrappers: List of PlotSeries instances.
         title: Figure title string.
 
     Returns:
@@ -234,8 +252,8 @@ def generate_table(rows: List[dict], columns: List[dict], emoji_config: Optional
     emojis = compute_row_emojis(rows, emoji_config)
     row_names = [emojis[r["name"]] + r["name"] for r in rows]
     
-    header = f"| {row_header} | " + " | ".join(c["header"] for c in columns) + " |\\n"
-    sep = "|---|" + "|".join(["---" for _ in columns]) + "|\\n"
+    header = f"| {row_header} | " + " | ".join(c["header"] for c in columns) + " |\n"
+    sep = "|---|" + "|".join(["---" for _ in columns]) + "|\n"
     
     lines = []
     for i, row in enumerate(rows):
@@ -265,7 +283,7 @@ def generate_table(rows: List[dict], columns: List[dict], emoji_config: Optional
                 cells.append(fmt.format(value=val))
         lines.append(f"| {row_names[i]} | " + " | ".join(cells) + " |")
         
-    return header + sep + "\\n".join(lines) + "\\n", emojis
+    return header + sep + "\n".join(lines) + "\n", emojis
 
 def get_sweep_plot(
     thresholds: np.ndarray,
