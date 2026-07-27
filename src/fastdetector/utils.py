@@ -4,53 +4,80 @@ from huggingface_hub import HfApi, hf_hub_download
 from datasets import Dataset, load_dataset, get_dataset_config_names, concatenate_datasets
 
 
+SHARD_CONFIG_PREFIX = "shard_"
+
+
+def shard_config_name(batch_id: int) -> str:
+    """Return the HF config name a given batch id reads from and writes to."""
+    return f"{SHARD_CONFIG_PREFIX}{batch_id}"
+
+
 def load_dataset_auto_shard(
     dataset_name: str,
     split: str = "train",
     subset_index: Optional[int] = 0,
 ) -> Dataset:
-    """Load a dataset from the Hugging Face Hub, resolving a shard by index.
+    """Load one shard of a dataset from the Hugging Face Hub.
 
-    When ``subset_index`` is not ``None`` the dataset's configs are listed and
-    the config at position ``subset_index`` is loaded. This preserves the
-    sharding/subset-access behavior used throughout the pipeline (each shard
-    is uploaded as a separate HF config named ``shard_<i>``).
+    Shards are resolved **by name** (``shard_<i>``), matching the name every
+    writer in the pipeline pushes to. Resolving by position instead would let
+    a job read one shard and write its results to a different one, silently
+    overwriting another machine's output, because config ordering on the Hub
+    is not guaranteed to track the numeric shard index.
 
     Args:
         dataset_name: HF Hub dataset repo ID (e.g. "G-reen/cc-2021-rewritten").
         split: Dataset split (default "train").
-        subset_index: Index into the dataset's config list (default 0). If
-            ``None``, the default config is loaded without shard resolution.
+        subset_index: Shard/batch id. ``None`` loads the default config
+            without shard resolution.
 
     Returns:
         The loaded Dataset.
-    """
-    config_name = None
-    if subset_index is not None:
-        try:
-            configs = get_dataset_config_names(dataset_name)
-            if configs and subset_index < len(configs):
-                config_name = configs[subset_index]
-                print(
-                    f"Resolved subset_index {subset_index} to config "
-                    f"'{config_name}' for dataset {dataset_name}"
-                )
-            else:
-                print(
-                    f"Warning: dataset '{dataset_name}' has {len(configs) if configs else 0} "
-                    f"configs; subset_index {subset_index} is out of range. "
-                    f"Falling back to the default config."
-                )
-        except Exception as e:
-            print(
-                f"Warning: could not list configs for '{dataset_name}': "
-                f"{type(e).__name__}: {e}. Loading the default config."
-            )
 
-    print(f"Loading dataset from Hugging Face Hub: {dataset_name}...")
-    if config_name:
-        return load_dataset(dataset_name, name=config_name, split=split)
-    return load_dataset(dataset_name, split=split)
+    Raises:
+        RuntimeError: if the repo's configs cannot be listed, or if the
+            requested shard cannot be resolved unambiguously. Failing here is
+            deliberate: the previous behaviour silently fell back to the
+            default config, which makes every machine in a batched run
+            process the same rows.
+    """
+    if subset_index is None:
+        print(f"Loading default config of {dataset_name}...")
+        return load_dataset(dataset_name, split=split)
+
+    try:
+        configs = get_dataset_config_names(dataset_name)
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not list configs for '{dataset_name}' "
+            f"({type(e).__name__}: {e}). Refusing to guess which shard to "
+            f"load, because falling back to the default config would make "
+            f"every batched job process the same rows."
+        ) from e
+
+    expected = shard_config_name(subset_index)
+
+    if expected in configs:
+        config_name = expected
+    elif len(configs) == 1 and subset_index == 0:
+        # Single-config dataset (e.g. filter.py ran without output_shards).
+        # Only batch id 0 may claim it; any other id is a duplicate-work bug.
+        config_name = configs[0]
+        print(
+            f"Dataset '{dataset_name}' has no '{expected}' config but exactly "
+            f"one config ('{config_name}'); loading it for batch id 0."
+        )
+    else:
+        raise RuntimeError(
+            f"Cannot resolve shard {subset_index} of '{dataset_name}': no "
+            f"config named '{expected}'. Available configs: {configs}. "
+            f"Re-shard the dataset with the '{SHARD_CONFIG_PREFIX}<i>' naming "
+            f"scheme, or set override_dataset_input in globals.toml to point "
+            f"at the dataset you mean."
+        )
+
+    print(f"Loading config '{config_name}' of {dataset_name}...")
+    return load_dataset(dataset_name, name=config_name, split=split)
 
 
 def load_dataset_all_shards(
@@ -177,7 +204,12 @@ def upload_readme(
                 )
         print("README and files uploaded successfully.")
     except Exception as e:
-        print(f"Error uploading files to HuggingFace Hub: {e}")
+        # Previously this only printed, so a run whose upload failed still
+        # exited 0 and looked successful.
+        raise RuntimeError(
+            f"Failed to upload README/files to '{dataset_name}': "
+            f"{type(e).__name__}: {e}"
+        ) from e
 
 
 def apply_filter_conditions(
@@ -193,6 +225,11 @@ def apply_filter_conditions(
     to float. If coercion fails (ValueError/TypeError), the condition is
     treated as False (i.e. the row is filtered out).
 
+    A ``None`` cell is treated as non-matching, but a condition naming a
+    column that does not exist is an error rather than a silent
+    non-match: with filter_type="AND" a single typo would otherwise drop
+    every row and upload an empty dataset without warning.
+
     Args:
         dataset: The dataset to filter.
         conditions: List of ConditionConfig objects (each with .column,
@@ -201,9 +238,20 @@ def apply_filter_conditions(
 
     Returns:
         The filtered dataset.
+
+    Raises:
+        KeyError: if any condition names a column absent from the dataset.
     """
     if not conditions:
         return dataset
+
+    missing = sorted({c.column for c in conditions} - set(dataset.column_names))
+    if missing:
+        raise KeyError(
+            f"Filter conditions reference column(s) not present in the "
+            f"dataset: {missing}. Available columns: "
+            f"{sorted(dataset.column_names)}"
+        )
 
     print("Filtering dataset with parsed conditions:")
     for c in conditions:
@@ -224,7 +272,7 @@ def apply_filter_conditions(
             op = cond.operator
             val = cond.value
 
-            if col not in example or example[col] is None:
+            if example[col] is None:
                 bools.append(False)
                 continue
 
