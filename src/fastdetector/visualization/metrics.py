@@ -244,8 +244,18 @@ def compute_classifier_metrics(
     acc = (TP + TN) / total if total > 0 else 0.0
     fnr = FN / (TP + FN) if (TP + FN) > 0 else 0.0
 
+    # AUROC is threshold-free but not direction-free: roc_auc_score assumes
+    # a higher score means the positive class. For a lower_is_ai classifier
+    # (flip_inequality=True) the raw scores are ranked the wrong way round,
+    # which reported e.g. 0.05 for a classifier that separates at 0.95 and
+    # made the "best model" highlighting in the comparison table pick the
+    # worst one. Negation reverses the ranking without changing the metric.
+    ranked_scores = np.array(y_scores)
+    if flip_inequality:
+        ranked_scores = -ranked_scores
+
     try:
-        auroc = compute_auroc(np.array(y_true), np.array(y_scores))
+        auroc = compute_auroc(np.array(y_true), ranked_scores)
     except Exception:
         auroc = float("nan")
 

@@ -239,7 +239,14 @@ def binoculars_scores_approx(token_logprobs_m1: list[list[float | None]],
             Z_m2 = sum(p_m2_dict.values())
             M_m2 = max(0.0, 1.0 - Z_m2)
             p_min_m2 = min(p_m2_dict.values()) if p_m2_dict else 0.0
-            p_bound_m2 = min(p_min_m2, M_m2)
+            # When the top-N already covers all the mass (M_m2 == 0) the
+            # bound collapses to 0 and log(1e-12) ~= -27.6 gets applied to
+            # every M1 token missing from M2's top-N, inflating the
+            # cross-entropy denominator and deflating the score. Fall back
+            # to the smallest observed top-N logprob instead, which is the
+            # tightest bound the data supports. _tail_moments already guards
+            # this case; this inline copy did not.
+            p_bound_m2 = min(p_min_m2, M_m2) if M_m2 > 0.0 else p_min_m2
             lp_tail_m2 = math.log(p_bound_m2 + 1e-12)
             
             # Tail mass for M1 (Observer)

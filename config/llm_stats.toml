@@ -12,10 +12,14 @@ fastdetectgpt_score = true
 topp_threshold = 0.95
 topk_threshold = 50
 
+# Order matters for binoculars_score: the FIRST checkpoint is the observer
+# (base model) and the SECOND is the performer (instruction-tuned), per the
+# contract documented on binoculars_scores_approx and the reference
+# implementation. These were previously the other way round.
 llm_checkpoints = [
-    "unsloth/Llama-3.2-3B-Instruct",
-    "unsloth/Llama-3.2-3B"
+    "unsloth/Llama-3.2-3B",
+    "unsloth/Llama-3.2-3B-Instruct"
 ]
-col_suffixes = ["_llama_instruct", "_llama_base"]
+col_suffixes = ["_llama_base", "_llama_instruct"]
 top_logprobs_k = 100
 # llm_vocab_size = 128256
